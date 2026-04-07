@@ -1,0 +1,20 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile for access control",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "user"] }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "User" },
+      "description": "User access control list"
+    }
+  }
+}

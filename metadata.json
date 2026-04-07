@@ -1,0 +1,5 @@
+{
+  "name": "CompTIA Sentinel",
+  "description": "Automated security auditing tool specialized in Security+ (SY0-701) and Cloud+ (CV0-003) standards.",
+  "requestFramePermissions": []
+}
