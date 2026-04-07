@@ -1,14 +1,3 @@
-import { Type } from '@google/genai';
-
-// ---------------------------------------------------------------------------
-// AI SYSTEM INSTRUCTION
-// Defines the persona, rules, and CompTIA standards the AI must follow.
-// This is passed to the Gemini model on every audit request.
-// 
-// 💡 TIP FOR EDITING: If you want the AI to look for new types of vulnerabilities,
-// just add a new "Prompt" line below. The AI reads this text like a checklist
-// before it analyzes the user's code.
-// ---------------------------------------------------------------------------
 export const SYSTEM_INSTRUCTION = `You are the "CompTIA Sentinel," an automated security auditing tool specialized in Security+ (SY0-701) and Cloud+ (CV0-003) standards, as well as senior developer best practices.
 You do not engage in casual conversation. You perform technical audits of code, configurations, and architectures. Your goal is to move beyond a SIEM by providing proactive validation of secure states.
 
@@ -41,56 +30,57 @@ LEGAL & COMPLIANCE PROTOCOL (2026 STANDARDS):
 - Directive 3.2 (Transparency): For any generative feature, enforce AI labeling and disclosure. Reference: CA SB 942.
 - Directive 3.3 (Data Privacy): Flag any 'Insecure Output Handling' that could leak training data. Reference: OWASP for LLM #02.
 
-Analyze the provided code/configuration/logs. Return a JSON object containing the findings and management summary. 
-CRITICAL: For every finding, you MUST extract the exact 'affectedCode' snippet that caused the violation to highlight it for the user. 
+Analyze the provided code/configuration/logs. Return a JSON object containing the findings and management summary.
+CRITICAL: For every finding, you MUST extract the exact 'affectedCode' snippet that caused the violation to highlight it for the user.
 CRITICAL: If a finding is "High" or "Critical" severity, you MUST provide 'detailedSteps' (an array of strings) explaining exactly how to remediate the issue step-by-step.
 CRITICAL: You MUST provide 'seniorDeveloperTips' (an array of strings) containing advanced tips, tricks, and best practices that a senior developer would use to prevent these issues or improve the overall architecture and execution.
 If the file is secure, set isSecure to true and provide an empty findings array, but still provide senior developer tips for general improvement.`;
 
-// ---------------------------------------------------------------------------
-// AI RESPONSE SCHEMA
-// Enforces a strict JSON structure for the Gemini model's output.
-// This guarantees the frontend always receives the exact data format it expects.
-// ---------------------------------------------------------------------------
 export const AUDIT_RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
+  type: "object",
   properties: {
-    isSecure: { type: Type.BOOLEAN },
-    Secure: { type: Type.BOOLEAN },
+    isSecure: { type: "boolean" },
+    Secure: { type: "boolean" },
     findings: {
-      type: Type.ARRAY,
+      type: "array",
       items: {
-        type: Type.OBJECT,
+        type: "object",
         properties: {
-          finding: { type: Type.STRING },
-          domain: { type: Type.STRING },
-          severity: { type: Type.STRING },
-          remediation: { type: Type.STRING },
-          affectedCode: { type: Type.STRING, description: "The exact snippet of code or log entry that triggered this finding." },
-          detailedSteps: { 
-            type: Type.ARRAY, 
-            items: { type: Type.STRING },
+          finding: { type: "string" },
+          domain: { type: "string" },
+          severity: { type: "string" },
+          remediation: { type: "string" },
+          affectedCode: {
+            type: "string",
+            description: "The exact snippet of code or log entry that triggered this finding."
+          },
+          detailedSteps: {
+            type: "array",
+            items: { type: "string" },
             description: "Step-by-step instructions to fix the issue. Required for High/Critical severity."
           }
         },
-        required: ["finding", "domain", "severity", "remediation"]
+        required: ["finding", "domain", "severity", "remediation"],
+        additionalProperties: false
       }
     },
     seniorDeveloperTips: {
-      type: Type.ARRAY,
-      items: { type: Type.STRING },
+      type: "array",
+      items: { type: "string" },
       description: "Advanced tips, tricks, and best practices from a senior developer perspective."
     },
     managementSummary: {
-      type: Type.OBJECT,
+      type: "object",
       properties: {
-        complianceStatus: { type: Type.STRING },
-        legalJurisdiction: { type: Type.STRING },
-        executiveActionRequired: { type: Type.STRING },
-        auditTrailId: { type: Type.STRING }
+        complianceStatus: { type: "string" },
+        legalJurisdiction: { type: "string" },
+        executiveActionRequired: { type: "string" },
+        auditTrailId: { type: "string" }
       },
-      required: ["complianceStatus", "legalJurisdiction", "executiveActionRequired", "auditTrailId"]
+      required: ["complianceStatus", "legalJurisdiction", "executiveActionRequired", "auditTrailId"],
+      additionalProperties: false
     }
   },
-  required: ["isSecure", "findings", "seniorDeveloperTips", "managementSummary"]
+  required: ["isSecure", "findings", "seniorDeveloperTips", "managementSummary"],
+  additionalProperties: false
 };

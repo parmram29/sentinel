@@ -3,20 +3,19 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import Anthropic from "@anthropic-ai/sdk";
 
-// Convert the callback-based exec function to a Promise-based one for easier async/await usage
 const execAsync = promisify(exec);
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Middleware to parse JSON bodies. Limit increased to 50mb to handle large code payloads.
   app.use(express.json({ limit: "50mb" }));
 
   // ---------------------------------------------------------------------------
   // API Route: /api/audit
-  // Description: Handles Gemini API calls securely on the backend.
+  // Description: Handles Claude API calls securely on the backend.
   // ---------------------------------------------------------------------------
   app.post("/api/audit", async (req, res) => {
     try {
@@ -25,31 +24,36 @@ async function startServer() {
         return res.status(400).json({ error: "No input code provided." });
       }
 
-      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) {
         return res.status(500).json({ error: "API key is missing on the server." });
       }
 
-      // Dynamic import to avoid issues with CommonJS/ESM if needed, or just import at top
-      const { GoogleGenAI } = await import("@google/genai");
-      const ai = new GoogleGenAI({ apiKey });
+      const client = new Anthropic({ apiKey });
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: `Audit the following payload:\n\n${inputCode}`,
-        config: {
-          systemInstruction: systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: responseSchema,
-        },
+      const response = await client.messages.create({
+        model: "claude-opus-4-6",
+        max_tokens: 16000,
+        system: systemInstruction,
+        messages: [
+          { role: "user", content: `Audit the following payload:\n\n${inputCode}` }
+        ],
+        tools: [
+          {
+            name: "audit_report",
+            description: "Return the structured CompTIA security audit report.",
+            input_schema: responseSchema,
+          }
+        ],
+        tool_choice: { type: "tool", name: "audit_report" },
       });
 
-      if (!response.text) {
-        return res.status(500).json({ error: "No response received from the model." });
+      const toolUseBlock = response.content.find((block) => block.type === "tool_use");
+      if (!toolUseBlock || toolUseBlock.type !== "tool_use") {
+        return res.status(500).json({ error: "No structured report received from the model." });
       }
 
-      const result = JSON.parse(response.text);
-      res.json(result);
+      res.json(toolUseBlock.input);
     } catch (error: any) {
       console.error("Audit Error:", error);
       res.status(500).json({ error: error.message || "An error occurred during the audit." });
@@ -58,8 +62,6 @@ async function startServer() {
 
   // ---------------------------------------------------------------------------
   // API Route: /api/execute
-  // Description: Executes shell commands (CLI) directly on the container.
-  // This is used for running tools like `npm audit` or custom scripts.
   // ---------------------------------------------------------------------------
   app.post("/api/execute", async (req, res) => {
     try {
@@ -68,25 +70,20 @@ async function startServer() {
         return res.status(400).json({ error: "No command provided." });
       }
 
-      // Execute the command with a 30-second timeout to prevent hanging processes
       const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
-      
       res.json({ stdout, stderr, error: null });
     } catch (error: any) {
       console.error("CLI Execution Error:", error);
-      // If the command fails (e.g., exit code 1), execAsync throws an error that contains stdout/stderr
-      res.json({ 
-        stdout: error.stdout || "", 
-        stderr: error.stderr || "", 
-        error: error.message || "Command execution failed." 
+      res.json({
+        stdout: error.stdout || "",
+        stderr: error.stderr || "",
+        error: error.message || "Command execution failed."
       });
     }
   });
 
   // ---------------------------------------------------------------------------
   // Vite Middleware & Static File Serving
-  // Description: Handles serving the React frontend. In development, it uses Vite's
-  // middleware for HMR. In production, it serves the compiled static files from /dist.
   // ---------------------------------------------------------------------------
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
