@@ -98,7 +98,7 @@ async function startServer() {
         max_tokens: 16000,
         system: systemInstruction,
         messages: [{ role: "user", content: `Audit the following payload:\n\n${inputCode}` }],
-        tools: [{ name: "audit_report", description: "Return the structured CompTIA security audit report.", input_schema: responseSchema }],
+        tools: [{ name: "audit_report", description: "Return the structured audit report.", input_schema: responseSchema as any,  }],
         tool_choice: { type: "tool", name: "audit_report" },
       });
 
@@ -192,7 +192,7 @@ async function startServer() {
         const response = await client.messages.create({
           model: "claude-opus-4-6", max_tokens: 16000, system: SYSTEM_INSTRUCTION,
           messages: [{ role: "user", content: `Audit push from ${pusher} on ${repo}:${branch}:\n\n${fileContents.join("\n\n")}` }],
-          tools: [{ name: "audit_report", description: "Return the structured audit report.", input_schema: AUDIT_RESPONSE_SCHEMA }],
+          tools: [{ name: "audit_report", description: "Return the structured audit report.", input_schema: AUDIT_RESPONSE_SCHEMA as any,         }],
           tool_choice: { type: "tool", name: "audit_report" },
         });
         const toolBlock = response.content.find((b) => b.type === "tool_use");
