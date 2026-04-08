@@ -8,11 +8,115 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const execAsync = promisify(exec);
 
+// ============================================================
+// SIEM — STRUCTURED SECURITY EVENT LOGGER
+// Sec+ 4.4 (Logging & Monitoring) / Cloud+ 3.3
+// Every security event is stamped: severity, IP, request ID.
+// Production upgrade: pipe to Splunk / Datadog / CloudWatch.
+// ============================================================
+type Severity = "INFO" | "WARN" | "HIGH" | "CRITICAL";
+
+interface SecurityEvent {
+  ts: string;
+  severity: Severity;
+  event: string;
+  ip: string;
+  rid: string;
+  details?: Record<string, unknown>;
+}
+
+const eventLog: SecurityEvent[] = [];
+const MAX_LOG = 5_000;
+
+function siem(severity: Severity, event: string, ip: string, rid: string, details?: Record<string, unknown>) {
+  const entry: SecurityEvent = { ts: new Date().toISOString(), severity, event, ip, rid, details };
+  if (eventLog.length >= MAX_LOG) eventLog.shift();
+  eventLog.push(entry);
+  const icon = severity === "CRITICAL" ? "🚨" : severity === "HIGH" ? "⚠️" : severity === "WARN" ? "⚡" : "ℹ️";
+  console.log(`${icon} [SIEM] ${JSON.stringify(entry)}`);
+}
+
+// ============================================================
+// IP REPUTATION ENGINE
+// Sec+ 4.2 (Access Control) / "Assume Breach" containment
+// Three-strike rule → auto-block. Honeypot hit → instant block.
+// ============================================================
+const blockedIPs = new Map<string, { reason: string; at: number }>();
+const strikeMap = new Map<string, number>();
+const STRIKE_LIMIT = 3;
+const BLOCK_TTL = 60 * 60 * 1_000; // 1 hour
+
+function blockIP(ip: string, reason: string, rid: string) {
+  blockedIPs.set(ip, { reason, at: Date.now() });
+  strikeMap.delete(ip);
+  siem("CRITICAL", "IP_BLOCKED", ip, rid, { reason });
+}
+
+function strike(ip: string, reason: string, rid: string) {
+  const n = (strikeMap.get(ip) ?? 0) + 1;
+  strikeMap.set(ip, n);
+  siem("HIGH", "STRIKE", ip, rid, { reason, strikes: n, threshold: STRIKE_LIMIT });
+  if (n >= STRIKE_LIMIT) blockIP(ip, `Auto-blocked: ${reason} (${n} strikes)`, rid);
+}
+
+function isBlocked(ip: string): boolean {
+  const b = blockedIPs.get(ip);
+  if (!b) return false;
+  if (Date.now() - b.at > BLOCK_TTL) { blockedIPs.delete(ip); return false; }
+  return true;
+}
+
+// ============================================================
+// REQUEST ID MIDDLEWARE — Audit Trail (Sec+ 4.4)
+// ============================================================
+function attachRequestId(req: Request, res: Response, next: NextFunction) {
+  const rid = crypto.randomUUID();
+  (req as any).rid = rid;
+  res.setHeader("X-Request-Id", rid);
+  next();
+}
+
+function getRid(req: Request): string { return (req as any).rid ?? "no-rid"; }
+function getIP(req: Request): string {
+  return (req.ip ?? req.socket.remoteAddress ?? "unknown").replace(/^::ffff:/, "");
+}
+
+// ============================================================
+// IP GUARD — runs on every route
+// ============================================================
+function ipGuard(req: Request, res: Response, next: NextFunction) {
+  const ip = getIP(req);
+  if (isBlocked(ip)) {
+    siem("WARN", "BLOCKED_IP_HIT", ip, getRid(req), { path: req.path, method: req.method });
+    return res.status(403).json({ error: "Access denied." });
+  }
+  next();
+}
+
+// ============================================================
+// SCANNER USER-AGENT FILTER
+// sqlmap, nikto, nmap, burpsuite etc. identify themselves.
+// ============================================================
+const SCANNER_UA = /sqlmap|nikto|nmap|masscan|dirsearch|gobuster|wfuzz|burpsuite|zgrab|nuclei|python-requests\/2\.[01]/i;
+
+function uaGuard(req: Request, res: Response, next: NextFunction) {
+  const ua = req.headers["user-agent"] ?? "";
+  if (SCANNER_UA.test(ua)) {
+    const ip = getIP(req);
+    blockIP(ip, `Scanner UA: ${ua.slice(0, 80)}`, getRid(req));
+    return res.status(403).json({ error: "Access denied." });
+  }
+  next();
+}
+
+// ============================================================
+// RATE LIMITER — Sec+ 3.6 / Cloud+ 3.3
+// ============================================================
 const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
 function rateLimit(maxRequests: number, windowMs: number) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const ip = (req.ip ?? req.socket.remoteAddress ?? "unknown").replace(/^::ffff:/, "");
+    const ip = getIP(req);
     const now = Date.now();
     const record = rateLimitStore.get(ip);
     if (!record || now > record.resetAt) {
@@ -20,6 +124,7 @@ function rateLimit(maxRequests: number, windowMs: number) {
       return next();
     }
     if (record.count >= maxRequests) {
+      strike(ip, "RateLimit exceeded", getRid(req));
       res.setHeader("Retry-After", Math.ceil((record.resetAt - now) / 1000).toString());
       return res.status(429).json({ error: "Rate limit exceeded. Please wait before retrying." });
     }
@@ -28,6 +133,9 @@ function rateLimit(maxRequests: number, windowMs: number) {
   };
 }
 
+// ============================================================
+// COMMAND ALLOWLIST — Sec+ 3.2 (OS Command Injection)
+// ============================================================
 const ALLOWED_COMMANDS: readonly string[] = [
   "npm audit", "npm audit --json", "npm outdated", "npx snyk test",
   "pip-audit", "pip-audit --json", "bandit -r .", "semgrep --config auto .",
@@ -37,24 +145,78 @@ const ALLOWED_COMMANDS: readonly string[] = [
 ];
 
 function isCommandAllowed(command: string): boolean {
-  const trimmed = command.trim();
-  return ALLOWED_COMMANDS.some((a) => trimmed === a || trimmed.startsWith(a + " "));
+  const t = command.trim();
+  return ALLOWED_COMMANDS.some((a) => t === a || t.startsWith(a + " "));
 }
 
+// ============================================================
+// ANOMALY SCANNER — Payload threat detection (OWASP / Sec+ 3.2)
+// Logs threats but does NOT block audit payloads — auditing
+// malicious code is the whole point of this app.
+// ============================================================
+const THREAT_SIGNATURES: { label: string; pattern: RegExp }[] = [
+  { label: "SQLi",              pattern: /(\bUNION\b.{0,20}\bSELECT\b|\bDROP\b.{0,10}\bTABLE\b)/i },
+  { label: "XSS",               pattern: /<script[\s\S]*?>[\s\S]*?<\/script>/i },
+  { label: "PathTraversal",     pattern: /\.\.[/\\]/ },
+  { label: "TemplateInjection", pattern: /\$\{[\s\S]{0,80}\}|#\{[\s\S]{0,80}\}/ },
+  { label: "SSRF",              pattern: /(wget|curl)\s+https?:\/\//i },
+  { label: "CodeInjection",     pattern: /\b(eval|exec|system|passthru|shell_exec)\s*\(/i },
+  { label: "XXE",               pattern: /<!ENTITY\s/i },
+  { label: "LDAP_Injection",    pattern: /[)(|*\\].*(?:uid|cn|dc)=/i },
+];
+
+function scanForThreats(payload: string): string[] {
+  return THREAT_SIGNATURES.filter(({ pattern }) => pattern.test(payload)).map(({ label }) => label);
+}
+
+// ============================================================
+// CIRCUIT BREAKER — Claude API resilience (Cloud+ 3.3)
+// 3 failures in 30s → OPEN circuit → return 503 gracefully.
+// Auto-transitions to HALF_OPEN after cooldown.
+// ============================================================
+type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
+const circuit = { failures: 0, lastFailure: 0, state: "CLOSED" as CircuitState };
+const CB_THRESHOLD = 3;
+const CB_RESET_MS = 30_000;
+
+function circuitAllow(): boolean {
+  if (circuit.state === "CLOSED" || circuit.state === "HALF_OPEN") return true;
+  if (Date.now() - circuit.lastFailure > CB_RESET_MS) { circuit.state = "HALF_OPEN"; return true; }
+  return false;
+}
+function circuitSuccess() { circuit.failures = 0; circuit.state = "CLOSED"; }
+function circuitFailure() {
+  circuit.failures++;
+  circuit.lastFailure = Date.now();
+  if (circuit.failures >= CB_THRESHOLD) {
+    circuit.state = "OPEN";
+    console.error("[Sentinel] ⚡ Circuit OPEN — Claude API degraded. Auto-recovery in 30s.");
+  }
+}
+
+// ============================================================
+// SECURITY HEADERS — Cloud+ 4.0 / OWASP Secure Headers
+// ============================================================
 function securityHeaders(_req: Request, res: Response, next: NextFunction) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
   res.setHeader("Content-Security-Policy",
     ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'",
      "img-src 'self' data:", "connect-src 'self'", "font-src 'self'", "object-src 'none'",
-     "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'"].join("; "));
+     "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'", "upgrade-insecure-requests"].join("; "));
   res.removeHeader("X-Powered-By");
   next();
 }
 
+// ============================================================
+// CORS — Sec+ 4.2
+// ============================================================
 const ALLOWED_ORIGINS = new Set(["http://localhost:3000", "http://127.0.0.1:3000"]);
 
 function corsMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -70,18 +232,71 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// ============================================================
+// CANARY / HONEYPOT PATHS — Sec+ 4.4 (Threat Intelligence)
+// Legitimate users never touch these. Any hit = scanner/attacker.
+// Returns a convincing fake response to gather intel.
+// ============================================================
+const HONEYPOT_PATHS = new Set([
+  "/admin", "/admin/", "/admin/login",
+  "/.env", "/.env.local", "/.env.production",
+  "/.git/config", "/.git/HEAD",
+  "/config", "/config.json", "/config.yml",
+  "/wp-admin", "/wp-login.php", "/wp-config.php",
+  "/phpmyadmin", "/pma", "/mysql",
+  "/api/keys", "/api/credentials", "/api/tokens",
+  "/api/admin", "/api/users", "/api/debug",
+  "/api/config", "/api/env", "/api/secrets",
+  "/actuator", "/actuator/env", "/actuator/health",
+  "/console", "/h2-console",
+  "/server-status", "/server-info",
+  "/api/v1/admin", "/api/v2/admin",
+  "/passwords.txt", "/secrets.txt", "/backup.sql",
+  "/debug", "/trace", "/metrics",
+]);
+
+// ============================================================
+// SERVER
+// ============================================================
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
+  // Global middleware — ORDER MATTERS
   app.set("trust proxy", 1);
-  app.use(securityHeaders);
-  app.use(corsMiddleware);
+  app.use(attachRequestId);  // 1. Tag every request with UUID
+  app.use(securityHeaders);  // 2. Harden response headers
+  app.use(corsMiddleware);    // 3. Origin whitelist
+  app.use(ipGuard);           // 4. Block known-bad IPs
+  app.use(uaGuard);           // 5. Block scanner user-agents
   app.use(express.json({ limit: "5mb" }));
 
+  // HONEYPOT TRAP — registered before all real routes
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!HONEYPOT_PATHS.has(req.path)) return next();
+    const ip = getIP(req);
+    const rid = getRid(req);
+    blockIP(ip, `Honeypot: ${req.path}`, rid);
+    siem("CRITICAL", "HONEYPOT_HIT", ip, rid, {
+      path: req.path,
+      method: req.method,
+      ua: req.headers["user-agent"]?.slice(0, 120),
+    });
+    // Convincing decoy response — wastes attacker time, generates intel
+    res.status(200).json({
+      status: "ok",
+      _token: crypto.randomBytes(32).toString("hex"),
+      _note: "This endpoint is monitored.",
+    });
+  });
+
+  // POST /api/audit
   app.post("/api/audit", rateLimit(10, 60_000), async (req: Request, res: Response) => {
+    const ip = getIP(req);
+    const rid = getRid(req);
     try {
       const { inputCode, systemInstruction, responseSchema } = req.body;
+
       if (!inputCode || typeof inputCode !== "string")
         return res.status(400).json({ error: "Input code is required." });
       if (inputCode.length > 500_000)
@@ -89,23 +304,41 @@ async function startServer() {
       if (typeof systemInstruction !== "string" || !systemInstruction)
         return res.status(400).json({ error: "System instruction is missing." });
 
+      const threats = scanForThreats(inputCode);
+      if (threats.length > 0)
+        siem("WARN", "SUSPICIOUS_PAYLOAD", ip, rid, { threats, payloadLength: inputCode.length });
+
+      if (!circuitAllow()) {
+        siem("HIGH", "CIRCUIT_OPEN_REJECT", ip, rid, {});
+        return res.status(503).json({ error: "Audit service temporarily unavailable. Please retry in 30 seconds." });
+      }
+
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) return res.status(503).json({ error: "Audit service unavailable." });
 
       const client = new Anthropic({ apiKey });
-      const response = await client.messages.create({
-        model: "claude-opus-4-6",
-        max_tokens: 16000,
-        system: systemInstruction,
-        messages: [{ role: "user", content: `Audit the following payload:\n\n${inputCode}` }],
-        tools: [{ name: "audit_report", description: "Return the structured audit report.", input_schema: responseSchema as any,  }],
-        tool_choice: { type: "tool", name: "audit_report" },
-      });
+      let response;
+      try {
+        response = await client.messages.create({
+          model: "claude-opus-4-6",
+          max_tokens: 16000,
+          system: systemInstruction,
+          messages: [{ role: "user", content: `Audit the following payload:\n\n${inputCode}` }],
+          tools: [{ name: "audit_report", description: "Return the structured CompTIA security audit report.", input_schema: responseSchema as any }],
+          tool_choice: { type: "tool", name: "audit_report" },
+        });
+        circuitSuccess();
+      } catch (apiErr: any) {
+        circuitFailure();
+        siem("HIGH", "CLAUDE_API_ERROR", ip, rid, { error: apiErr?.message });
+        throw apiErr;
+      }
 
       const toolUseBlock = response.content.find((b) => b.type === "tool_use");
       if (!toolUseBlock || toolUseBlock.type !== "tool_use")
         return res.status(502).json({ error: "Invalid response from audit model." });
 
+      siem("INFO", "AUDIT_COMPLETE", ip, rid, { payloadLength: inputCode.length, threats });
       res.json(toolUseBlock.input);
     } catch (error: any) {
       console.error("[Sentinel] Audit Error:", error?.message ?? error);
@@ -113,15 +346,22 @@ async function startServer() {
     }
   });
 
+  // POST /api/execute
   app.post("/api/execute", rateLimit(20, 60_000), async (req: Request, res: Response) => {
+    const ip = getIP(req);
+    const rid = getRid(req);
     try {
       const { command } = req.body;
       if (!command || typeof command !== "string")
         return res.status(400).json({ error: "No command provided." });
+
       if (!isCommandAllowed(command)) {
-        console.warn(`[Sentinel] BLOCKED command from ${req.ip}: "${command}"`);
-        return res.status(403).json({ error: "Command not permitted.", allowed: ALLOWED_COMMANDS });
+        strike(ip, `Disallowed command: ${command.slice(0, 80)}`, rid);
+        siem("HIGH", "COMMAND_BLOCKED", ip, rid, { command: command.slice(0, 200) });
+        return res.status(403).json({ error: "Command not permitted. Only security audit tools are allowed." });
       }
+
+      siem("INFO", "COMMAND_EXEC", ip, rid, { command });
       const { stdout, stderr } = await execAsync(command, { timeout: 30_000, maxBuffer: 1024 * 1024 * 5 });
       res.json({ stdout, stderr, error: null });
     } catch (error: any) {
@@ -129,20 +369,27 @@ async function startServer() {
     }
   });
 
+  // POST /api/webhook — GitHub CI/CD, HMAC-SHA256 verified
   app.post("/api/webhook",
     express.raw({ type: "application/json" }),
     rateLimit(30, 60_000),
     async (req: Request, res: Response) => {
+      const ip = getIP(req);
+      const rid = getRid(req);
       const secret = process.env.GITHUB_WEBHOOK_SECRET;
       if (!secret) return res.status(503).json({ error: "Webhook not configured." });
 
       const signature = req.headers["x-hub-signature-256"] as string | undefined;
-      if (!signature) return res.status(401).json({ error: "Missing signature." });
+      if (!signature) { strike(ip, "Webhook missing signature", rid); return res.status(401).json({ error: "Missing signature." }); }
 
       const expected = "sha256=" + crypto.createHmac("sha256", secret).update(req.body).digest("hex");
       let match = false;
       try { match = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature)); } catch {}
-      if (!match) return res.status(401).json({ error: "Invalid signature." });
+      if (!match) {
+        strike(ip, "Webhook invalid signature", rid);
+        siem("HIGH", "WEBHOOK_SIG_FAIL", ip, rid, {});
+        return res.status(401).json({ error: "Invalid signature." });
+      }
 
       const event = req.headers["x-github-event"] as string;
       if (event !== "push") return res.status(200).json({ message: `Event '${event}' acknowledged.` });
@@ -164,8 +411,7 @@ async function startServer() {
         .filter((f) => /\.(ts|tsx|js|jsx|py|go|rb|java|cs|php|tf|yaml|yml|json|toml|sh)$/i.test(f))
         .slice(0, 10);
 
-      if (filesToAudit.length === 0)
-        return res.json({ message: "No auditable files.", branch, pusher });
+      if (filesToAudit.length === 0) return res.json({ message: "No auditable files.", branch, pusher });
 
       const headers: Record<string, string> = { "User-Agent": "CompTIA-Sentinel" };
       if (process.env.GITHUB_TOKEN) headers["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN}`;
@@ -178,8 +424,7 @@ async function startServer() {
         } catch {}
       }
 
-      if (fileContents.length === 0)
-        return res.json({ message: "Could not fetch file contents." });
+      if (fileContents.length === 0) return res.json({ message: "Could not fetch file contents." });
 
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!apiKey) return res.status(503).json({ error: "Audit service unavailable." });
@@ -192,20 +437,43 @@ async function startServer() {
         const response = await client.messages.create({
           model: "claude-opus-4-6", max_tokens: 16000, system: SYSTEM_INSTRUCTION,
           messages: [{ role: "user", content: `Audit push from ${pusher} on ${repo}:${branch}:\n\n${fileContents.join("\n\n")}` }],
-          tools: [{ name: "audit_report", description: "Return the structured audit report.", input_schema: AUDIT_RESPONSE_SCHEMA as any,         }],
+          tools: [{ name: "audit_report", description: "Return structured audit report.", input_schema: AUDIT_RESPONSE_SCHEMA as any }],
           tool_choice: { type: "tool", name: "audit_report" },
         });
         const toolBlock = response.content.find((b) => b.type === "tool_use");
         if (toolBlock?.type === "tool_use") {
           const result = toolBlock.input as any;
-          console.log(`[Sentinel] Webhook audit: ${repo}:${branch} → ${result.isSecure ? "PASS" : `FAIL (${result.findings?.length} findings)`}`);
+          const status = result.isSecure ? "PASS" : `FAIL (${result.findings?.length} findings)`;
+          siem("INFO", "WEBHOOK_AUDIT_COMPLETE", ip, rid, { repo, branch, status });
+          console.log(`[Sentinel] Webhook audit: ${repo}:${branch} → ${status}`);
         }
       } catch (err: any) {
+        siem("HIGH", "WEBHOOK_AUDIT_ERROR", ip, rid, { error: err?.message });
         console.error("[Sentinel] Webhook audit error:", err?.message ?? err);
       }
     }
   );
 
+  // GET /api/security/events — SIEM dashboard (passphrase-gated)
+  app.get("/api/security/events", (req: Request, res: Response) => {
+    const passphrase = req.headers["x-sentinel-passphrase"] as string | undefined;
+    const expected = process.env.VITE_DEV_PASSPHRASE;
+    if (!expected || !passphrase) return res.status(401).json({ error: "Unauthorized." });
+    let match = false;
+    try { match = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(passphrase)); } catch {}
+    if (!match) {
+      strike(getIP(req), "SIEM unauthorized attempt", getRid(req));
+      return res.status(401).json({ error: "Unauthorized." });
+    }
+    const severity = req.query.severity as string | undefined;
+    const limit = Math.min(parseInt(req.query.limit as string ?? "200"), 1000);
+    const events = severity
+      ? eventLog.filter((e) => e.severity === severity.toUpperCase()).slice(-limit)
+      : eventLog.slice(-limit);
+    res.json({ total: eventLog.length, returned: events.length, circuitState: circuit.state, blockedIPs: blockedIPs.size, events });
+  });
+
+  // Vite dev / static production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
@@ -216,7 +484,12 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Sentinel] Server → http://localhost:${PORT}`);
+    console.log(`[Sentinel] Server          → http://localhost:${PORT}`);
+    console.log(`[Sentinel] Rate limits     : 10 audits/min · 20 exec/min · 30 webhook/min`);
+    console.log(`[Sentinel] Honeypot paths  : ${HONEYPOT_PATHS.size} traps armed`);
+    console.log(`[Sentinel] Threat sigs     : ${THREAT_SIGNATURES.length} patterns loaded`);
+    console.log(`[Sentinel] Circuit breaker : CLOSED (threshold: ${CB_THRESHOLD} failures)`);
+    console.log(`[Sentinel] SIEM            : active (max ${MAX_LOG} events in-memory)`);
   });
 }
 
