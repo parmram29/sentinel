@@ -217,7 +217,7 @@ function securityHeaders(_req: Request, res: Response, next: NextFunction) {
 // ============================================================
 // CORS — Sec+ 4.2
 // ============================================================
-const ALLOWED_ORIGINS = new Set(["http://localhost:3000", "http://127.0.0.1:3000"]);
+const ALLOWED_ORIGINS = new Set(["http://localhost:3000","http://127.0.0.1:3000",...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN] : [])]);
 
 function corsMiddleware(req: Request, res: Response, next: NextFunction) {
   const origin = req.headers.origin;
