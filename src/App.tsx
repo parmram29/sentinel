@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Server, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, LogOut, X } from 'lucide-react';
+import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Server, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, X, Globe } from 'lucide-react';
 import { AuditResult, CliExecutionResult, HistoryEntry } from './types';
-import { performAudit, executeCliCommand } from './services/auditService';
+import { performAudit, executeCliCommand, fetchUrlContent } from './services/auditService';
 import { exportReport } from './utils/exportUtils';
 
 export default function App() {
@@ -53,10 +53,57 @@ export default function App() {
     localStorage.removeItem(HISTORY_KEY);
   };
 
-  const [activeTab, setActiveTab] = useState<'payload' | 'cli'>('payload');
+  const [activeTab, setActiveTab] = useState<'payload' | 'cli' | 'url'>('payload');
   const [cliCommand, setCliCommand] = useState('');
   const [isExecutingCli, setIsExecutingCli] = useState(false);
   const [cliOutput, setCliOutput] = useState<CliExecutionResult | null>(null);
+
+  // URL scan state
+  const [urlInput, setUrlInput] = useState('');
+  const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+  const [urlFetchResult, setUrlFetchResult] = useState<{ content: string; scriptCount: number; url: string } | null>(null);
+  const [showSourcePrompt, setShowSourcePrompt] = useState(false);
+  const [urlSourceCode, setUrlSourceCode] = useState('');
+
+  const handleFetchUrl = async () => {
+    if (!urlInput.trim()) return;
+    setIsFetchingUrl(true);
+    setUrlFetchResult(null);
+    setShowSourcePrompt(false);
+    setUrlSourceCode('');
+    setError(null);
+    try {
+      const result = await fetchUrlContent(urlInput.trim());
+      setUrlFetchResult(result);
+      setShowSourcePrompt(true);
+    } catch (err: any) {
+      setError(err.message || "Failed to fetch URL.");
+    } finally {
+      setIsFetchingUrl(false);
+    }
+  };
+
+  const runUrlAudit = async (includeSource: boolean) => {
+    if (!urlFetchResult) return;
+    setShowSourcePrompt(false);
+    const combined = includeSource && urlSourceCode.trim()
+      ? `${urlFetchResult.content}\n\n--- User-Provided Source Code ---\n${urlSourceCode}`
+      : urlFetchResult.content;
+    setInputCode(combined);
+    setActiveTab('payload');
+    setIsAuditing(true);
+    setError(null);
+    setAuditResult(null);
+    try {
+      const result = await performAudit(combined);
+      setAuditResult(result);
+      saveToHistory(result, combined);
+    } catch (err: any) {
+      setError(err.message || "An error occurred during the audit.");
+    } finally {
+      setIsAuditing(false);
+    }
+  };
 
   const PRESET_COMMANDS = [
     { label: 'npm audit', cmd: 'npm audit' },
@@ -128,10 +175,10 @@ export default function App() {
       <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm sticky top-0 z-10 shrink-0">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-          <Shield
-  className={`w-6 h-6 transition-colors cursor-pointer ${isDevMode ? 'text-purple-500' : 'text-emerald-500'}`}
-  onClick={handleShieldClick}
-/>
+            <Shield
+              className={`w-6 h-6 transition-colors cursor-pointer ${isDevMode ? 'text-purple-500' : 'text-emerald-500'}`}
+              onClick={handleShieldClick}
+            />
             <h1 className="font-mono text-lg font-medium text-zinc-100 tracking-tight">CompTIA Sentinel</h1>
             <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-zinc-800 text-zinc-400 border border-zinc-700 hidden sm:inline-block">
               v2.1.0-RT
@@ -189,6 +236,10 @@ export default function App() {
                 className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded transition-colors ${activeTab === 'cli' ? 'bg-zinc-800 text-zinc-200 shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}>
                 <Terminal className="w-4 h-4" />CLI / Scripts
               </button>
+              <button onClick={() => setActiveTab('url')}
+                className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded transition-colors ${activeTab === 'url' ? 'bg-zinc-800 text-zinc-200 shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}>
+                <Globe className="w-4 h-4" />URL Scan
+              </button>
             </div>
             {activeTab === 'payload' && (
               <div className="flex items-center gap-2">
@@ -205,7 +256,50 @@ export default function App() {
             )}
           </div>
 
-          {activeTab === 'payload' ? (
+          {activeTab === 'url' ? (
+            <div className="flex-1 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 relative rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden focus-within:border-emerald-500/50 transition-colors flex items-center px-3">
+                  <Globe className="w-4 h-4 text-emerald-500 shrink-0" />
+                  <input type="url" value={urlInput} onChange={e => setUrlInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleFetchUrl()}
+                    placeholder="https://example.com"
+                    className="w-full py-3 px-2 bg-transparent text-zinc-300 font-mono text-sm focus:outline-none" />
+                </div>
+                <button onClick={handleFetchUrl} disabled={isFetchingUrl || !urlInput.trim()}
+                  className="flex items-center gap-2 px-4 py-3 bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors shrink-0">
+                  {isFetchingUrl ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}Fetch
+                </button>
+              </div>
+              <p className="text-[11px] font-mono text-zinc-600">Fetches public HTML + JavaScript. Read-only — like View Source.</p>
+
+              {showSourcePrompt && urlFetchResult && (
+                <div className="flex flex-col gap-3 p-4 rounded-lg border border-zinc-700 bg-zinc-900/70">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-mono text-zinc-200 font-semibold">URL fetched — {urlFetchResult.scriptCount} script(s) found</p>
+                      <p className="text-xs font-mono text-zinc-500 mt-1">Want to include source code for a deeper backend analysis?</p>
+                    </div>
+                    <button onClick={() => setShowSourcePrompt(false)} className="text-zinc-600 hover:text-zinc-400"><X className="w-4 h-4" /></button>
+                  </div>
+                  <textarea value={urlSourceCode} onChange={e => setUrlSourceCode(e.target.value)}
+                    placeholder="Paste backend source code here (optional)..."
+                    rows={5}
+                    className="w-full p-3 bg-zinc-950 text-zinc-300 font-mono text-xs rounded border border-zinc-800 focus:border-emerald-500/50 focus:outline-none resize-none" />
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => runUrlAudit(true)} disabled={isAuditing}
+                      className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 text-zinc-950 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors">
+                      <ShieldAlert className="w-4 h-4" />{urlSourceCode.trim() ? 'Audit URL + Source' : 'Audit URL Only'}
+                    </button>
+                    <button onClick={() => runUrlAudit(false)} disabled={isAuditing}
+                      className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 font-mono text-xs uppercase tracking-wider rounded transition-colors">
+                      Skip
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'payload' ? (
             <div className="flex-1 relative rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden focus-within:border-emerald-500/50 transition-colors">
               <textarea value={inputCode} onChange={(e) => setInputCode(e.target.value)}
                 placeholder="Paste source code, IaC (Terraform/Bicep), configuration files, or logs here..."

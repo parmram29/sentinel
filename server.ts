@@ -234,8 +234,6 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction) {
 
 // ============================================================
 // CANARY / HONEYPOT PATHS — Sec+ 4.4 (Threat Intelligence)
-// Legitimate users never touch these. Any hit = scanner/attacker.
-// Returns a convincing fake response to gather intel.
 // ============================================================
 const HONEYPOT_PATHS = new Set([
   "/admin", "/admin/", "/admin/login",
@@ -262,16 +260,15 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-  // Global middleware — ORDER MATTERS
   app.set("trust proxy", 1);
-  app.use(attachRequestId);  // 1. Tag every request with UUID
-  app.use(securityHeaders);  // 2. Harden response headers
-  app.use(corsMiddleware);    // 3. Origin whitelist
-  app.use(ipGuard);           // 4. Block known-bad IPs
-  app.use(uaGuard);           // 5. Block scanner user-agents
+  app.use(attachRequestId);
+  app.use(securityHeaders);
+  app.use(corsMiddleware);
+  app.use(ipGuard);
+  app.use(uaGuard);
   app.use(express.json({ limit: "5mb" }));
 
-  // HONEYPOT TRAP — registered before all real routes
+  // HONEYPOT TRAP
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!HONEYPOT_PATHS.has(req.path)) return next();
     const ip = getIP(req);
@@ -282,7 +279,6 @@ async function startServer() {
       method: req.method,
       ua: req.headers["user-agent"]?.slice(0, 120),
     });
-    // Convincing decoy response — wastes attacker time, generates intel
     res.status(200).json({
       status: "ok",
       _token: crypto.randomBytes(32).toString("hex"),
@@ -343,6 +339,66 @@ async function startServer() {
     } catch (error: any) {
       console.error("[Sentinel] Audit Error:", error?.message ?? error);
       res.status(500).json({ error: "An internal error occurred during the audit." });
+    }
+  });
+
+  // POST /api/url-scan — fetch public URL, extract HTML + scripts (SSRF-protected)
+  app.post("/api/url-scan", rateLimit(10, 60_000), async (req: Request, res: Response) => {
+    const ip = getIP(req);
+    const rid = getRid(req);
+    try {
+      const { url } = req.body;
+      if (!url || typeof url !== "string")
+        return res.status(400).json({ error: "URL is required." });
+
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { return res.status(400).json({ error: "Invalid URL." }); }
+
+      if (!["http:", "https:"].includes(parsed.protocol))
+        return res.status(400).json({ error: "Only http/https URLs allowed." });
+
+      const hostname = parsed.hostname.toLowerCase();
+      const BLOCKED = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^::1$/, /^localhost$/i, /^0\.0\.0\.0$/];
+      if (BLOCKED.some(r => r.test(hostname))) {
+        strike(ip, `SSRF attempt: ${hostname}`, rid);
+        return res.status(403).json({ error: "Private/internal URLs are not allowed." });
+      }
+
+      siem("INFO", "URL_SCAN_REQUEST", ip, rid, { url: url.slice(0, 200) });
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      let html: string;
+      try {
+        const r = await fetch(url, { signal: controller.signal, headers: { "User-Agent": "CompTIA-Sentinel/2.0 Security-Auditor" } });
+        clearTimeout(timeout);
+        if (!r.ok) return res.status(502).json({ error: `URL returned ${r.status}.` });
+        html = (await r.text()).slice(0, 200_000);
+      } catch (e: any) {
+        clearTimeout(timeout);
+        return res.status(502).json({ error: e.name === "AbortError" ? "Request timed out." : "Failed to fetch URL." });
+      }
+
+      const scriptMatches = [...html.matchAll(/<script(?![^>]*src)[^>]*>([\s\S]*?)<\/script>/gi)];
+      const inlineScripts = scriptMatches.map(m => m[1].trim()).filter(s => s.length > 0).join("\n\n");
+      const srcMatches = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)];
+      const scriptSrcs = srcMatches.map(m => m[1]).filter(s => !s.includes("cdn") && !s.includes("analytics")).slice(0, 5);
+
+      const origin = `${parsed.protocol}//${parsed.host}`;
+      const fetchedScripts: string[] = [];
+      for (const src of scriptSrcs.slice(0, 3)) {
+        try {
+          const fullSrc = src.startsWith("http") ? src : `${origin}${src.startsWith("/") ? "" : "/"}${src}`;
+          const r = await fetch(fullSrc, { headers: { "User-Agent": "CompTIA-Sentinel/2.0" } });
+          if (r.ok) fetchedScripts.push(`--- External Script: ${src} ---\n${(await r.text()).slice(0, 50_000)}`);
+        } catch {}
+      }
+
+      const content = [`--- Page HTML: ${url} ---\n${html}`, inlineScripts ? `--- Inline Scripts ---\n${inlineScripts}` : "", ...fetchedScripts].filter(Boolean).join("\n\n");
+      res.json({ content, scriptCount: scriptMatches.length + fetchedScripts.length, url });
+    } catch (err: any) {
+      siem("HIGH", "URL_SCAN_ERROR", ip, rid, { error: err?.message });
+      res.status(500).json({ error: "Failed to scan URL." });
     }
   });
 

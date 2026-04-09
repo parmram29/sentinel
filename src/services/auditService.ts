@@ -37,6 +37,22 @@ export async function performAudit(inputCode: string): Promise<AuditResult> {
 }
 
 /**
+ * Fetches a public URL and extracts its HTML/JS content for auditing.
+ */
+export async function fetchUrlContent(url: string): Promise<{ content: string; scriptCount: number; url: string }> {
+  const response = await fetch('/api/url-scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to fetch URL.");
+  }
+  return response.json();
+}
+
+/**
  * Sends a shell command to the backend to be executed on the container.
  * @param command The shell command to run (e.g., 'npm audit').
  * @returns A Promise that resolves to the CliExecutionResult object containing stdout/stderr.
