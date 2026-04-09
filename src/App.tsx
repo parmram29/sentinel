@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Server, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, X, Globe } from 'lucide-react';
+import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, X, Globe } from 'lucide-react';
 import { AuditResult, CliExecutionResult, HistoryEntry } from './types';
 import { performAudit, executeCliCommand, fetchUrlContent } from './services/auditService';
 import { exportReport } from './utils/exportUtils';
@@ -179,7 +179,7 @@ export default function App() {
               className={`w-6 h-6 transition-colors cursor-pointer ${isDevMode ? 'text-purple-500' : 'text-emerald-500'}`}
               onClick={handleShieldClick}
             />
-            <h1 className="font-mono text-lg font-medium text-zinc-100 tracking-tight">CompTIA Sentinel</h1>
+            <h1 className="font-mono text-lg font-medium text-zinc-100 tracking-tight">Sentinel Lite</h1>
             <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-zinc-800 text-zinc-400 border border-zinc-700 hidden sm:inline-block">
               v2.1.0-RT
             </span>
@@ -413,7 +413,7 @@ export default function App() {
                 {isAuditing && (
                   <div className="flex-1 flex flex-col items-center justify-center text-emerald-500/70 gap-4 min-h-[200px]">
                     <Loader2 className="w-10 h-10 animate-spin" />
-                    <div className="font-mono text-xs uppercase tracking-widest animate-pulse text-center">Analyzing against CompTIA standards...</div>
+                    <div className="font-mono text-xs uppercase tracking-widest animate-pulse text-center">Analyzing against standards/restrictions...</div>
                   </div>
                 )}
                 {error && (
