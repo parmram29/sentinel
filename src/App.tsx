@@ -185,8 +185,8 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-3 text-xs font-mono text-zinc-500">
-            <div className="hidden md:flex items-center gap-1.5"><Server className="w-3.5 h-3.5" /><span>SY0-701</span></div>
-            <div className="hidden md:flex items-center gap-1.5"><Lock className="w-3.5 h-3.5" /><span>CV0-003</span></div>
+          <div className="hidden md:flex items-center gap-1.5"><span>🐬</span><span className="font-mono text-[10px]">DSC-7</span></div>
+          <div className="hidden md:flex items-center gap-1.5"><Lock className="w-3.5 h-3.5" /><span>BUILD-447</span></div>
             <div className="hidden md:flex items-center gap-1.5 text-emerald-500/80 border-l border-zinc-700 pl-3">
               <ShieldAlert className="w-3.5 h-3.5" /><span>Anomaly Detection Active</span>
             </div>
