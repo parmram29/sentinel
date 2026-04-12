@@ -5,14 +5,20 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import crypto from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
+import { createClient } from "@supabase/supabase-js";
 
 const execAsync = promisify(exec);
 
 // ============================================================
+// SUPABASE ADMIN CLIENT — JWT verification
+// ============================================================
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
+// ============================================================
 // SIEM — STRUCTURED SECURITY EVENT LOGGER
-// Sec+ 4.4 (Logging & Monitoring) / Cloud+ 3.3
-// Every security event is stamped: severity, IP, request ID.
-// Production upgrade: pipe to Splunk / Datadog / CloudWatch.
 // ============================================================
 type Severity = "INFO" | "WARN" | "HIGH" | "CRITICAL";
 
@@ -38,13 +44,11 @@ function siem(severity: Severity, event: string, ip: string, rid: string, detail
 
 // ============================================================
 // IP REPUTATION ENGINE
-// Sec+ 4.2 (Access Control) / "Assume Breach" containment
-// Three-strike rule → auto-block. Honeypot hit → instant block.
 // ============================================================
 const blockedIPs = new Map<string, { reason: string; at: number }>();
 const strikeMap = new Map<string, number>();
 const STRIKE_LIMIT = 3;
-const BLOCK_TTL = 60 * 60 * 1_000; // 1 hour
+const BLOCK_TTL = 60 * 60 * 1_000;
 
 function blockIP(ip: string, reason: string, rid: string) {
   blockedIPs.set(ip, { reason, at: Date.now() });
@@ -67,7 +71,35 @@ function isBlocked(ip: string): boolean {
 }
 
 // ============================================================
-// REQUEST ID MIDDLEWARE — Audit Trail (Sec+ 4.4)
+// CROWDSEC — Crowd-sourced IP threat intelligence
+// ============================================================
+const crowdSecCache = new Map<string, { blocked: boolean; at: number }>();
+const CROWDSEC_CACHE_TTL = 60 * 60 * 1_000;
+
+async function crowdSecCheck(ip: string, rid: string): Promise<boolean> {
+  const cached = crowdSecCache.get(ip);
+  if (cached && Date.now() - cached.at < CROWDSEC_CACHE_TTL) return cached.blocked;
+
+  const apiKey = process.env.CROWDSEC_API_KEY;
+  if (!apiKey) return false;
+
+  try {
+    const res = await fetch(`https://cti.api.crowdsec.net/v2/smoke/${ip}`, {
+      headers: { "X-Api-Key": apiKey, "User-Agent": "Sentinel-Lite/2.0" },
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    const blocked = data.reputation === "malicious" || data.reputation === "suspicious";
+    crowdSecCache.set(ip, { blocked, at: Date.now() });
+    if (blocked) siem("HIGH", "CROWDSEC_BLOCK", ip, rid, { reputation: data.reputation, scores: data.scores });
+    return blocked;
+  } catch {
+    return false;
+  }
+}
+
+// ============================================================
+// REQUEST ID MIDDLEWARE
 // ============================================================
 function attachRequestId(req: Request, res: Response, next: NextFunction) {
   const rid = crypto.randomUUID();
@@ -82,12 +114,18 @@ function getIP(req: Request): string {
 }
 
 // ============================================================
-// IP GUARD — runs on every route
+// IP GUARD — with CrowdSec integration
 // ============================================================
-function ipGuard(req: Request, res: Response, next: NextFunction) {
+async function ipGuard(req: Request, res: Response, next: NextFunction) {
   const ip = getIP(req);
+  const rid = getRid(req);
   if (isBlocked(ip)) {
-    siem("WARN", "BLOCKED_IP_HIT", ip, getRid(req), { path: req.path, method: req.method });
+    siem("WARN", "BLOCKED_IP_HIT", ip, rid, { path: req.path, method: req.method });
+    return res.status(403).json({ error: "Access denied." });
+  }
+  const crowdBlocked = await crowdSecCheck(ip, rid);
+  if (crowdBlocked) {
+    blockIP(ip, "CrowdSec: malicious/suspicious reputation", rid);
     return res.status(403).json({ error: "Access denied." });
   }
   next();
@@ -95,7 +133,6 @@ function ipGuard(req: Request, res: Response, next: NextFunction) {
 
 // ============================================================
 // SCANNER USER-AGENT FILTER
-// sqlmap, nikto, nmap, burpsuite etc. identify themselves.
 // ============================================================
 const SCANNER_UA = /sqlmap|nikto|nmap|masscan|dirsearch|gobuster|wfuzz|burpsuite|zgrab|nuclei|python-requests\/2\.[01]/i;
 
@@ -110,7 +147,7 @@ function uaGuard(req: Request, res: Response, next: NextFunction) {
 }
 
 // ============================================================
-// RATE LIMITER — Sec+ 3.6 / Cloud+ 3.3
+// RATE LIMITER
 // ============================================================
 const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
@@ -134,7 +171,25 @@ function rateLimit(maxRequests: number, windowMs: number) {
 }
 
 // ============================================================
-// COMMAND ALLOWLIST — Sec+ 3.2 (OS Command Injection)
+// SUPABASE JWT VERIFICATION
+// ============================================================
+async function verifySupabaseToken(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Authentication required." });
+  }
+  const token = authHeader.slice(7);
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !user) {
+    strike(getIP(req), "Invalid auth token", getRid(req));
+    return res.status(401).json({ error: "Invalid or expired session." });
+  }
+  (req as any).user = user;
+  next();
+}
+
+// ============================================================
+// COMMAND ALLOWLIST
 // ============================================================
 const ALLOWED_COMMANDS: readonly string[] = [
   "npm audit", "npm audit --json", "npm outdated", "npx snyk test",
@@ -150,9 +205,7 @@ function isCommandAllowed(command: string): boolean {
 }
 
 // ============================================================
-// ANOMALY SCANNER — Payload threat detection (OWASP / Sec+ 3.2)
-// Logs threats but does NOT block audit payloads — auditing
-// malicious code is the whole point of this app.
+// ANOMALY SCANNER
 // ============================================================
 const THREAT_SIGNATURES: { label: string; pattern: RegExp }[] = [
   { label: "SQLi",              pattern: /(\bUNION\b.{0,20}\bSELECT\b|\bDROP\b.{0,10}\bTABLE\b)/i },
@@ -170,9 +223,7 @@ function scanForThreats(payload: string): string[] {
 }
 
 // ============================================================
-// CIRCUIT BREAKER — Claude API resilience (Cloud+ 3.3)
-// 3 failures in 30s → OPEN circuit → return 503 gracefully.
-// Auto-transitions to HALF_OPEN after cooldown.
+// CIRCUIT BREAKER
 // ============================================================
 type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
 const circuit = { failures: 0, lastFailure: 0, state: "CLOSED" as CircuitState };
@@ -195,7 +246,7 @@ function circuitFailure() {
 }
 
 // ============================================================
-// SECURITY HEADERS — Cloud+ 4.0 / OWASP Secure Headers
+// SECURITY HEADERS
 // ============================================================
 function securityHeaders(_req: Request, res: Response, next: NextFunction) {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -208,16 +259,17 @@ function securityHeaders(_req: Request, res: Response, next: NextFunction) {
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
   res.setHeader("Content-Security-Policy",
     ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'",
-     "img-src 'self' data:", "connect-src 'self'", "font-src 'self'", "object-src 'none'",
-     "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'", "upgrade-insecure-requests"].join("; "));
+     "img-src 'self' data:", "connect-src 'self' https://*.supabase.co", "font-src 'self'",
+     "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'",
+     "upgrade-insecure-requests"].join("; "));
   res.removeHeader("X-Powered-By");
   next();
 }
 
 // ============================================================
-// CORS — Sec+ 4.2
+// CORS
 // ============================================================
-const ALLOWED_ORIGINS = new Set(["http://localhost:3000","http://127.0.0.1:3000",...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN] : [])]);
+const ALLOWED_ORIGINS = new Set(["http://localhost:3000", "http://127.0.0.1:3000", ...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN] : [])]);
 
 function corsMiddleware(req: Request, res: Response, next: NextFunction) {
   const origin = req.headers.origin;
@@ -226,14 +278,14 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.status(204).end();
   next();
 }
 
 // ============================================================
-// CANARY / HONEYPOT PATHS — Sec+ 4.4 (Threat Intelligence)
+// HONEYPOT PATHS
 // ============================================================
 const HONEYPOT_PATHS = new Set([
   "/admin", "/admin/", "/admin/login",
@@ -275,8 +327,7 @@ async function startServer() {
     const rid = getRid(req);
     blockIP(ip, `Honeypot: ${req.path}`, rid);
     siem("CRITICAL", "HONEYPOT_HIT", ip, rid, {
-      path: req.path,
-      method: req.method,
+      path: req.path, method: req.method,
       ua: req.headers["user-agent"]?.slice(0, 120),
     });
     res.status(200).json({
@@ -286,8 +337,8 @@ async function startServer() {
     });
   });
 
-  // POST /api/audit
-  app.post("/api/audit", rateLimit(10, 60_000), async (req: Request, res: Response) => {
+  // POST /api/audit — requires auth
+  app.post("/api/audit", rateLimit(10, 60_000), verifySupabaseToken, async (req: Request, res: Response) => {
     const ip = getIP(req);
     const rid = getRid(req);
     try {
@@ -320,7 +371,7 @@ async function startServer() {
           max_tokens: 16000,
           system: systemInstruction,
           messages: [{ role: "user", content: `Audit the following payload:\n\n${inputCode}` }],
-          tools: [{ name: "audit_report", description: "Return the structured CompTIA security audit report.", input_schema: responseSchema as any }],
+          tools: [{ name: "audit_report", description: "Return the structured security audit report.", input_schema: responseSchema as any }],
           tool_choice: { type: "tool", name: "audit_report" },
         });
         circuitSuccess();
@@ -334,7 +385,7 @@ async function startServer() {
       if (!toolUseBlock || toolUseBlock.type !== "tool_use")
         return res.status(502).json({ error: "Invalid response from audit model." });
 
-      siem("INFO", "AUDIT_COMPLETE", ip, rid, { payloadLength: inputCode.length, threats });
+      siem("INFO", "AUDIT_COMPLETE", ip, rid, { payloadLength: inputCode.length, threats, user: (req as any).user?.email });
       res.json(toolUseBlock.input);
     } catch (error: any) {
       console.error("[Sentinel] Audit Error:", error?.message ?? error);
@@ -342,8 +393,8 @@ async function startServer() {
     }
   });
 
-  // POST /api/url-scan — fetch public URL, extract HTML + scripts (SSRF-protected)
-  app.post("/api/url-scan", rateLimit(10, 60_000), async (req: Request, res: Response) => {
+  // POST /api/url-scan — requires auth
+  app.post("/api/url-scan", rateLimit(10, 60_000), verifySupabaseToken, async (req: Request, res: Response) => {
     const ip = getIP(req);
     const rid = getRid(req);
     try {
@@ -370,7 +421,7 @@ async function startServer() {
       const timeout = setTimeout(() => controller.abort(), 10_000);
       let html: string;
       try {
-        const r = await fetch(url, { signal: controller.signal, headers: { "User-Agent": "CompTIA-Sentinel/2.0 Security-Auditor" } });
+        const r = await fetch(url, { signal: controller.signal, headers: { "User-Agent": "Sentinel-Lite/2.0 Security-Auditor" } });
         clearTimeout(timeout);
         if (!r.ok) return res.status(502).json({ error: `URL returned ${r.status}.` });
         html = (await r.text()).slice(0, 200_000);
@@ -389,7 +440,7 @@ async function startServer() {
       for (const src of scriptSrcs.slice(0, 3)) {
         try {
           const fullSrc = src.startsWith("http") ? src : `${origin}${src.startsWith("/") ? "" : "/"}${src}`;
-          const r = await fetch(fullSrc, { headers: { "User-Agent": "CompTIA-Sentinel/2.0" } });
+          const r = await fetch(fullSrc, { headers: { "User-Agent": "Sentinel-Lite/2.0" } });
           if (r.ok) fetchedScripts.push(`--- External Script: ${src} ---\n${(await r.text()).slice(0, 50_000)}`);
         } catch {}
       }
@@ -402,8 +453,8 @@ async function startServer() {
     }
   });
 
-  // POST /api/execute
-  app.post("/api/execute", rateLimit(20, 60_000), async (req: Request, res: Response) => {
+  // POST /api/execute — requires auth
+  app.post("/api/execute", rateLimit(20, 60_000), verifySupabaseToken, async (req: Request, res: Response) => {
     const ip = getIP(req);
     const rid = getRid(req);
     try {
@@ -417,7 +468,7 @@ async function startServer() {
         return res.status(403).json({ error: "Command not permitted. Only security audit tools are allowed." });
       }
 
-      siem("INFO", "COMMAND_EXEC", ip, rid, { command });
+      siem("INFO", "COMMAND_EXEC", ip, rid, { command, user: (req as any).user?.email });
       const { stdout, stderr } = await execAsync(command, { timeout: 30_000, maxBuffer: 1024 * 1024 * 5 });
       res.json({ stdout, stderr, error: null });
     } catch (error: any) {
@@ -469,7 +520,7 @@ async function startServer() {
 
       if (filesToAudit.length === 0) return res.json({ message: "No auditable files.", branch, pusher });
 
-      const headers: Record<string, string> = { "User-Agent": "CompTIA-Sentinel" };
+      const headers: Record<string, string> = { "User-Agent": "Sentinel-Lite/2.0" };
       if (process.env.GITHUB_TOKEN) headers["Authorization"] = `Bearer ${process.env.GITHUB_TOKEN}`;
 
       const fileContents: string[] = [];
@@ -501,11 +552,9 @@ async function startServer() {
           const result = toolBlock.input as any;
           const status = result.isSecure ? "PASS" : `FAIL (${result.findings?.length} findings)`;
           siem("INFO", "WEBHOOK_AUDIT_COMPLETE", ip, rid, { repo, branch, status });
-          console.log(`[Sentinel] Webhook audit: ${repo}:${branch} → ${status}`);
         }
       } catch (err: any) {
         siem("HIGH", "WEBHOOK_AUDIT_ERROR", ip, rid, { error: err?.message });
-        console.error("[Sentinel] Webhook audit error:", err?.message ?? err);
       }
     }
   );
@@ -531,7 +580,10 @@ async function startServer() {
 
   // Vite dev / static production
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    const vite = await createViteServer({
+      server: { middlewareMode: true, allowedHosts: [".up.railway.app"] },
+      appType: "spa"
+    });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
@@ -541,6 +593,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Sentinel] Server          → http://localhost:${PORT}`);
+    console.log(`[Sentinel] Auth            : Supabase JWT verification active`);
+    console.log(`[Sentinel] CrowdSec        : ${process.env.CROWDSEC_API_KEY ? "active" : "disabled (no API key)"}`);
     console.log(`[Sentinel] Rate limits     : 10 audits/min · 20 exec/min · 30 webhook/min`);
     console.log(`[Sentinel] Honeypot paths  : ${HONEYPOT_PATHS.size} traps armed`);
     console.log(`[Sentinel] Threat sigs     : ${THREAT_SIGNATURES.length} patterns loaded`);

@@ -1,15 +1,37 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, X, Globe } from 'lucide-react';
+import { Shield, ShieldAlert, ShieldCheck, Terminal, Code, Lock, AlertTriangle, CheckCircle, Loader2, Upload, Download, FileText, ChevronRight, Play, History, Clock, X, Globe, LogOut } from 'lucide-react';
 import { AuditResult, CliExecutionResult, HistoryEntry } from './types';
 import { performAudit, executeCliCommand, fetchUrlContent } from './services/auditService';
 import { exportReport } from './utils/exportUtils';
+import { supabase } from './lib/supabase';
+import AuthGate from './components/AuthGate';
 
 export default function App() {
+  const [session, setSession] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+  };
+
   const [inputCode, setInputCode] = useState('');
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditResult, setAuditResult] = useState<AuditResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const HISTORY_KEY = 'sentinel_audit_history';
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -58,7 +80,6 @@ export default function App() {
   const [isExecutingCli, setIsExecutingCli] = useState(false);
   const [cliOutput, setCliOutput] = useState<CliExecutionResult | null>(null);
 
-  // URL scan state
   const [urlInput, setUrlInput] = useState('');
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
   const [urlFetchResult, setUrlFetchResult] = useState<{ content: string; scriptCount: number; url: string } | null>(null);
@@ -138,6 +159,7 @@ export default function App() {
     }
     setInputCode((prev) => (prev ? prev + newContent : newContent.trim()));
     if (fileInputRef.current) fileInputRef.current.value = '';
+    if (folderInputRef.current) folderInputRef.current.value = '';
   };
 
   const runAudit = async () => {
@@ -170,6 +192,18 @@ export default function App() {
     }
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthGate onAuth={() => supabase.auth.getSession().then(({ data: { session } }) => setSession(session))} />;
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-300 font-sans selection:bg-emerald-500/30 flex flex-col">
       <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm sticky top-0 z-10 shrink-0">
@@ -185,11 +219,12 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-3 text-xs font-mono text-zinc-500">
-          <div className="hidden md:flex items-center gap-1.5"><span>🐬</span><span className="font-mono text-[10px]">DSC-7</span></div>
-          <div className="hidden md:flex items-center gap-1.5"><Lock className="w-3.5 h-3.5" /><span>BUILD-447</span></div>
+            <div className="hidden md:flex items-center gap-1.5"><span>🐬</span><span className="font-mono text-[10px]">DSC-7</span></div>
+            <div className="hidden md:flex items-center gap-1.5"><Lock className="w-3.5 h-3.5" /><span>BUILD-447</span></div>
             <div className="hidden md:flex items-center gap-1.5 text-emerald-500/80 border-l border-zinc-700 pl-3">
               <ShieldAlert className="w-3.5 h-3.5" /><span>Anomaly Detection Active</span>
             </div>
+            <span className="hidden md:inline text-zinc-600 font-mono text-[10px] border-l border-zinc-700 pl-3">{session.user.email}</span>
             <button
               onClick={() => setRightView(v => v === 'history' ? 'report' : 'history')}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded border font-mono text-[10px] uppercase tracking-wider transition-colors ${rightView === 'history' ? 'bg-zinc-700 border-zinc-600 text-zinc-200' : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300'}`}
@@ -197,6 +232,13 @@ export default function App() {
               <History className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">History</span>
               {history.length > 0 && <span className="bg-emerald-500/20 text-emerald-400 px-1 rounded text-[9px]">{history.length}</span>}
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border font-mono text-[10px] uppercase tracking-wider transition-colors bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-red-400 hover:border-red-500/30"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Logout</span>
             </button>
           </div>
         </div>
@@ -244,9 +286,14 @@ export default function App() {
             {activeTab === 'payload' && (
               <div className="flex items-center gap-2">
                 <input type="file" multiple className="hidden" ref={fileInputRef} onChange={handleFileUpload} />
+                <input type="file" multiple className="hidden" ref={folderInputRef} onChange={handleFileUpload} {...{ webkitdirectory: "" }} />
                 <button onClick={() => fileInputRef.current?.click()}
                   className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors border border-zinc-700">
-                  <Upload className="w-4 h-4" /><span className="hidden sm:inline-block">Upload Files</span>
+                  <Upload className="w-4 h-4" /><span className="hidden sm:inline-block">Files</span>
+                </button>
+                <button onClick={() => folderInputRef.current?.click()}
+                  className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors border border-zinc-700">
+                  <Upload className="w-4 h-4" /><span className="hidden sm:inline-block">Folder</span>
                 </button>
                 <button onClick={runAudit} disabled={isAuditing || !inputCode.trim()}
                   className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors">
@@ -272,7 +319,6 @@ export default function App() {
                 </button>
               </div>
               <p className="text-[11px] font-mono text-zinc-600">Fetches public HTML + JavaScript. Read-only — like View Source.</p>
-
               {showSourcePrompt && urlFetchResult && (
                 <div className="flex flex-col gap-3 p-4 rounded-lg border border-zinc-700 bg-zinc-900/70">
                   <div className="flex items-start justify-between gap-2">
@@ -492,7 +538,7 @@ export default function App() {
                     {auditResult.seniorDeveloperTips && auditResult.seniorDeveloperTips.length > 0 && (
                       <div className="mt-4 border-t border-zinc-800 pt-6">
                         <h3 className="text-xs font-mono uppercase tracking-widest text-purple-400 mb-4 flex items-center gap-2">
-                          <Terminal className="w-4 h-4" />Senior Developer Tips & Tricks
+                          <Terminal className="w-4 h-4" />Pointers / Strategies
                         </h3>
                         <div className="p-4 rounded-lg bg-purple-900/10 border border-purple-500/20">
                           <ul className="space-y-3">
