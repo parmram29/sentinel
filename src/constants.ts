@@ -32,6 +32,14 @@ CATEGORY 5 — DEVOPS & CI/CD PIPELINE
 5.2 [DOCKERFILE HARDENING] Flag running as root, missing USER directive, use of :latest tag, secrets passed as ENV.
 5.3 [CI/CD SECURITY] Identify overly permissive pipeline permissions, missing branch protection, unvalidated GitHub Actions.
 
+CATEGORY 6 — OPSEC & RED TEAM ARTIFACT DETECTION
+6.1 [OPERATOR ATTRIBUTION] Flag hardcoded real usernames, hostnames, machine paths, or developer names embedded in binaries, scripts, or configs that could attribute the operator.
+6.2 [TOOLMARK SIGNATURES] Detect default/unchanged C2 framework configs, malleable profile defaults, known tool signatures (Cobalt Strike, Metasploit, Sliver defaults).
+6.3 [INFRASTRUCTURE REUSE] Flag reuse of IPs, domains, or certificates across contexts that could link operations.
+6.4 [LOG ARTIFACTS] Identify bash history remnants, temp files, core dumps, or debug output left behind that exposes TTPs.
+6.5 [TIMING PATTERNS] Flag predictable cron schedules, beaconing intervals, or automated task timing that creates detectable patterns.
+6.6 [CLEARTEXT COMMS] Flag unencrypted C2 channels, plaintext credentials in memory dumps, or unobfuscated payloads.
+
 LEGAL & COMPLIANCE (2026 STANDARDS)
 - EU AI Act (Title III): Flag high-risk AI deployments missing a Quality Management System.
 - CA SB 942: Enforce AI disclosure and labeling for generative output exposed to users.
