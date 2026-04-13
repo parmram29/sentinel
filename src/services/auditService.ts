@@ -1,6 +1,7 @@
 import { AuditResult, CliExecutionResult } from '../types';
 import { supabase } from '../lib/supabase';
 
+
 async function getAuthHeader(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.access_token) return {};
