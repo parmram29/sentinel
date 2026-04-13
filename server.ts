@@ -6,6 +6,8 @@ import { promisify } from "util";
 import crypto from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
+import { SYSTEM_INSTRUCTION, AUDIT_RESPONSE_SCHEMA } from "./src/constants.js";
+
 
 const execAsync = promisify(exec);
 
@@ -342,15 +344,13 @@ async function startServer() {
     const ip = getIP(req);
     const rid = getRid(req);
     try {
-      const { inputCode, systemInstruction, responseSchema } = req.body;
+      const { inputCode } = req.body;
 
       if (!inputCode || typeof inputCode !== "string")
         return res.status(400).json({ error: "Input code is required." });
       if (inputCode.length > 500_000)
         return res.status(413).json({ error: "Payload exceeds 500,000 character limit." });
-      if (typeof systemInstruction !== "string" || !systemInstruction)
-        return res.status(400).json({ error: "System instruction is missing." });
-
+     
       const threats = scanForThreats(inputCode);
       if (threats.length > 0)
         siem("WARN", "SUSPICIOUS_PAYLOAD", ip, rid, { threats, payloadLength: inputCode.length });
@@ -369,9 +369,9 @@ async function startServer() {
         response = await client.messages.create({
           model: "claude-opus-4-6",
           max_tokens: 16000,
-          system: systemInstruction,
+          system: SYSTEM_INSTRUCTION,
           messages: [{ role: "user", content: `Audit the following payload:\n\n${inputCode}` }],
-          tools: [{ name: "audit_report", description: "Return the structured security audit report.", input_schema: responseSchema as any }],
+          tools: [{ name: "audit_report", description: "Return the structured security audit report.", input_schema: AUDIT_RESPONSE_SCHEMA as any          }],
           tool_choice: { type: "tool", name: "audit_report" },
         });
         circuitSuccess();
