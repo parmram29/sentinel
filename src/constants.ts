@@ -91,10 +91,20 @@ export const AUDIT_RESPONSE_SCHEMA = {
         executiveActionRequired: { type: "string" },
         auditTrailId: { type: "string" },
       },
-      required: ["complianceStatus", "legalJurisdiction", "executiveActionRequired", "auditTrailId"],
+      required: [
+        "complianceStatus",
+        "legalJurisdiction",
+        "executiveActionRequired",
+        "auditTrailId",
+      ],
       additionalProperties: false,
     },
   },
-  required: ["isSecure", "findings", "seniorDeveloperTips", "managementSummary"],
+  required: [
+    "isSecure",
+    "findings",
+    "seniorDeveloperTips",
+    "managementSummary",
+  ],
   additionalProperties: false,
 };

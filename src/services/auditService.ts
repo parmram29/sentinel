@@ -1,20 +1,21 @@
-import { AuditResult, CliExecutionResult } from '../types';
-import { supabase } from '../lib/supabase';
-
+import { AuditResult, CliExecutionResult } from "../types";
+import { supabase } from "../lib/supabase";
 
 async function getAuthHeader(): Promise<Record<string, string>> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
   if (!session?.access_token) return {};
-  return { 'Authorization': `Bearer ${session.access_token}` };
+  return { Authorization: `Bearer ${session.access_token}` };
 }
 
 export async function performAudit(inputCode: string): Promise<AuditResult> {
   if (!inputCode) throw new Error("No input code provided.");
 
   const authHeader = await getAuthHeader();
-  const response = await fetch('/api/audit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeader },
+  const response = await fetch("/api/audit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader },
     body: JSON.stringify({ inputCode }),
   });
 
@@ -25,11 +26,13 @@ export async function performAudit(inputCode: string): Promise<AuditResult> {
   return response.json();
 }
 
-export async function fetchUrlContent(url: string): Promise<{ content: string; scriptCount: number; url: string }> {
+export async function fetchUrlContent(
+  url: string,
+): Promise<{ content: string; scriptCount: number; url: string }> {
   const authHeader = await getAuthHeader();
-  const response = await fetch('/api/url-scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeader },
+  const response = await fetch("/api/url-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader },
     body: JSON.stringify({ url }),
   });
   if (!response.ok) {
@@ -39,11 +42,13 @@ export async function fetchUrlContent(url: string): Promise<{ content: string; s
   return response.json();
 }
 
-export async function executeCliCommand(command: string): Promise<CliExecutionResult> {
+export async function executeCliCommand(
+  command: string,
+): Promise<CliExecutionResult> {
   const authHeader = await getAuthHeader();
-  const response = await fetch('/api/execute', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeader },
+  const response = await fetch("/api/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader },
     body: JSON.stringify({ command }),
   });
 

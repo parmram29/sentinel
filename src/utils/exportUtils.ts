@@ -1,4 +1,4 @@
-import { AuditResult } from '../types';
+import { AuditResult } from "../types";
 
 export function exportReport(auditResult: AuditResult | null) {
   if (!auditResult) return;
@@ -18,13 +18,13 @@ export function exportReport(auditResult: AuditResult | null) {
       md += `### ${idx + 1}. ${f.finding}\n`;
       md += `- **Domain:** ${f.domain}\n`;
       md += `- **Severity:** ${f.severity}\n\n`;
-      
+
       if (f.affectedCode) {
         md += `**Affected Code / Log Snippet:**\n\`\`\`\n${f.affectedCode}\n\`\`\`\n\n`;
       }
-      
+
       md += `**Remediation Summary:**\n${f.remediation}\n\n`;
-      
+
       if (f.detailedSteps && f.detailedSteps.length > 0) {
         md += `**Step-by-Step Fix:**\n`;
         f.detailedSteps.forEach((step, stepIdx) => {
@@ -36,7 +36,10 @@ export function exportReport(auditResult: AuditResult | null) {
     });
   }
 
-  if (auditResult.seniorDeveloperTips && auditResult.seniorDeveloperTips.length > 0) {
+  if (
+    auditResult.seniorDeveloperTips &&
+    auditResult.seniorDeveloperTips.length > 0
+  ) {
     md += `## Senior Developer Tips & Tricks\n\n`;
     auditResult.seniorDeveloperTips.forEach((tip, idx) => {
       md += `- 💡 ${tip}\n`;
@@ -44,9 +47,9 @@ export function exportReport(auditResult: AuditResult | null) {
     md += `\n---\n\n`;
   }
 
-  const blob = new Blob([md], { type: 'text/markdown' });
+  const blob = new Blob([md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href = url;
   a.download = `Sentinel_Remediation_Sheet_${auditResult.managementSummary.auditTrailId}.md`;
   document.body.appendChild(a);

@@ -147,21 +147,33 @@ export default function App() {
     if (expected && passphrase === expected) setIsDevMode(true);
   };
 
+  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', 'build', '.cache', '__pycache__', '.venv', 'venv', '.idea', '.vscode']);
+  const SKIP_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.mp3', '.zip', '.tar', '.gz', '.lock', '.map']);
+  
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     let newContent = '';
+    let skipped = 0;
     for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const path = (file as any).webkitRelativePath || file.name;
+      const parts = path.split('/');
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+      if (parts.some((p: string) => SKIP_DIRS.has(p))) { skipped++; continue; }
+      if (SKIP_EXTS.has(ext)) { skipped++; continue; }
+      if (file.size > 100_000) { skipped++; continue; }
       try {
-        const text = await files[i].text();
-        newContent += `\n\n--- File: ${files[i].name} ---\n${text}\n`;
+        const text = await file.text();
+        newContent += `\n\n--- File: ${path} ---\n${text}\n`;
       } catch {}
     }
+    if (skipped > 0) console.log(`[Sentinel] Skipped ${skipped} files (node_modules, binaries, etc.)`);
     setInputCode((prev) => (prev ? prev + newContent : newContent.trim()));
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (folderInputRef.current) folderInputRef.current.value = '';
   };
-
+  
   const runAudit = async () => {
     if (!inputCode.trim()) return;
     setIsAuditing(true);
@@ -347,12 +359,18 @@ export default function App() {
             </div>
           ) : activeTab === 'payload' ? (
             <div className="flex-1 relative rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden focus-within:border-emerald-500/50 transition-colors">
-              <textarea value={inputCode} onChange={(e) => setInputCode(e.target.value)}
-                placeholder="Paste source code, IaC (Terraform/Bicep), configuration files, or logs here..."
-                className="w-full h-full p-4 bg-transparent text-zinc-300 font-mono text-sm resize-none focus:outline-none" spellCheck={false} />
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col gap-3">
+              <div className="relative w-full h-full">
+  <textarea value={inputCode} onChange={(e) => setInputCode(e.target.value)}
+    placeholder="Paste source code, IaC (Terraform/Bicep), configuration files, or logs here..."
+    className="w-full h-full p-4 bg-transparent text-zinc-300 font-mono text-sm resize-none focus:outline-none" spellCheck={false} />
+  {inputCode && (
+    <div className={`text-right font-mono text-[10px] absolute bottom-2 right-2 ${inputCode.length > 400_000 ? 'text-red-400' : inputCode.length > 250_000 ? 'text-amber-400' : 'text-zinc-600'}`}>
+      {inputCode.length.toLocaleString()} / 500,000 chars
+      {inputCode.length > 400_000 && <span className="ml-2 text-red-400">⚠ Near limit — consider removing large files</span>}
+    </div>
+  )}
+</div>
+
               <div className="flex flex-wrap gap-1.5">
                 {PRESET_COMMANDS.map(({ label, cmd }) => (
                   <button key={cmd} onClick={() => setCliCommand(cmd)}
@@ -399,8 +417,9 @@ export default function App() {
               </div>
             </div>
           )}
-        </div>
 
+        </div>
+    
         <div className="flex flex-col gap-4 h-full min-h-[400px] lg:overflow-hidden">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-xs font-mono uppercase tracking-widest text-zinc-400 flex items-center gap-2">

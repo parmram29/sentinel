@@ -1,15 +1,15 @@
-import React, { useState } from 'react';
-import { Shield, Loader2, AlertTriangle } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import React, { useState } from "react";
+import { Shield, Loader2, AlertTriangle } from "lucide-react";
+import { supabase } from "../lib/supabase";
 
 interface AuthGateProps {
   onAuth: () => void;
 }
 
 export default function AuthGate({ onAuth }: AuthGateProps) {
-  const [mode, setMode] = useState<'login' | 'signup'>('login');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -20,8 +20,11 @@ export default function AuthGate({ onAuth }: AuthGateProps) {
     setError(null);
     setMessage(null);
 
-    if (mode === 'login') {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (mode === "login") {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
       if (error) {
         setError(error.message);
       } else {
@@ -32,8 +35,8 @@ export default function AuthGate({ onAuth }: AuthGateProps) {
       if (error) {
         setError(error.message);
       } else {
-        setMessage('Check your email to confirm your account, then log in.');
-        setMode('login');
+        setMessage("Check your email to confirm your account, then log in.");
+        setMode("login");
       }
     }
     setIsLoading(false);
@@ -44,7 +47,9 @@ export default function AuthGate({ onAuth }: AuthGateProps) {
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-3 mb-8 justify-center">
           <Shield className="w-7 h-7 text-emerald-500" />
-          <h1 className="font-mono text-xl font-medium text-zinc-100 tracking-tight">Sentinel Lite</h1>
+          <h1 className="font-mono text-xl font-medium text-zinc-100 tracking-tight">
+            Sentinel Lite
+          </h1>
           <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-zinc-800 text-zinc-400 border border-zinc-700">
             v2.1.0-RT
           </span>
@@ -52,27 +57,31 @@ export default function AuthGate({ onAuth }: AuthGateProps) {
 
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-6">
           <h2 className="text-xs font-mono uppercase tracking-widest text-zinc-400 mb-6">
-            {mode === 'login' ? 'Operator Login' : 'Request Access'}
+            {mode === "login" ? "Operator Login" : "Request Access"}
           </h2>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Email</label>
+              <label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                Email
+              </label>
               <input
                 type="email"
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full px-3 py-2.5 bg-zinc-950 border border-zinc-800 rounded font-mono text-sm text-zinc-200 focus:outline-none focus:border-emerald-500/50"
                 placeholder="operator@domain.com"
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">Password</label>
+              <label className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                Password
+              </label>
               <input
                 type="password"
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value)}
                 required
                 className="w-full px-3 py-2.5 bg-zinc-950 border border-zinc-800 rounded font-mono text-sm text-zinc-200 focus:outline-none focus:border-emerald-500/50"
                 placeholder="••••••••"
@@ -98,16 +107,22 @@ export default function AuthGate({ onAuth }: AuthGateProps) {
               className="flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 font-mono text-xs uppercase tracking-wider font-semibold rounded transition-colors"
             >
               {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-              {mode === 'login' ? 'Login' : 'Sign Up'}
+              {mode === "login" ? "Login" : "Sign Up"}
             </button>
           </form>
 
           <div className="mt-4 pt-4 border-t border-zinc-800 text-center">
             <button
-              onClick={() => { setMode(m => m === 'login' ? 'signup' : 'login'); setError(null); setMessage(null); }}
+              onClick={() => {
+                setMode((m) => (m === "login" ? "signup" : "login"));
+                setError(null);
+                setMessage(null);
+              }}
               className="text-[11px] font-mono text-zinc-500 hover:text-zinc-300 transition-colors"
             >
-              {mode === 'login' ? "Don't have access? Sign up" : 'Already have an account? Login'}
+              {mode === "login"
+                ? "Don't have access? Sign up"
+                : "Already have an account? Login"}
             </button>
           </div>
         </div>
